@@ -1,0 +1,243 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[table,dvipsnames]{xcolor}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{makecell}
+\usepackage{float}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{svg}
+\usepackage{subcaption}
+\usepackage{listings}
+
+\usepackage{mathtools}
+\DeclarePairedDelimiter\bra{\langle}{\rvert}
+\DeclarePairedDelimiter\ket{\lvert}{\rangle}
+
+\usepackage[a4paper, includefoot, top=25mm, left=25mm, right=25mm, bottom=25mm]{geometry}
+
+\hypersetup{
+    unicode=true,    % allow unicode chars in hyperlinks
+    breaklinks=true,
+    hidelinks,       % disable frames around links
+    colorlinks=true, % show links in a different color
+    linkcolor=%
+        black,       % use a black color for links
+    urlcolor=%
+        Blue,    % use a dark blue color for file references
+    citecolor=%
+        OliveGreen,   % use a dark green color for cite notes
+    % the following is additional stuff
+    pdftitle=Validating Program Correctness Using Quantum Computing,       % title of the PDF
+    pdfauthor=Jakob Loew,      % author of the PDF
+    pdfkeywords=brainfuck quantum computing qubit qiskit,    % keywords of the PDF
+    pdfcreator=Jakob Loew,     % creator of the PDF
+    pdfproducer=Jakob Loew,    % producer of the PDF
+}
+
+\newenvironment{abstractbox}{
+%\begin{onecolumn}
+}{
+%\end{onecolumn}
+}
+
+\title{Validating Program Correctness Using Quantum Computing}
+\author{\textbf{Jakob Löw $^{1)}$} \\
+	\\
+	1) Technische Hochschule Ingolstadt \\
+		Esplanade 10, 85049 Ingolstadt, Germany (E-mail: jakob@löw.com) \\}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+Nearly no program is bug free. Depending on the nature of bugs they can result in anything from minor inconveniences to the user, unexpected behaviour or even security issues. Often bugs are caused by developers not having all edge cases and possible user inputs in mind when writing a piece of code. \\
+There already exist numerous tools for runtime and static code analysis. Static analysis tools however are limited in their possibilities due to their inability to analyze values depending on user inputs or other side effects. In order for a dynamic analysis tool to catch \textit{all} bugs it would have to run a program using all possible configurations and user inputs, which is hardly achievable in reality. \\
+This paper aims at approaching program analysis using quantum computing. The goal is to create a tool that, given a program as input, can generate a quantum circuit from it that resembles the program and can validate the absence of unexpected behaviour, i.e. there are no possible bugs in the program. \\
+For simplicity and understandability this paper will focus on analyzing programs written in the brainfuck programming language. In a first step the language and its programming patterns will be described. Next circuits for representing brainfuck programs in quantum computing will be discussed. Lastly a set of small example programs will be analysed using the created tool.
+
+
+
+\section{The Brainfuck Programming Language}
+The brainfuck programming language is the best known \textit{esoteric} programming language. Esoteric programming languages are languages with quirks which usually make them hard to use or simply impractical. They tend to break with common programming paradigms and often have a very reduced set of features. Because of that many programmers see it as a challenge to solve tasks which are easy to implement in regular programming languages, but hard in certain esoteric programming languages. This results in a large amount of projects written in languages such as brainfuck from chat bots\cite{bf-chatbot} to brainfuck compilers written in brainfuck itself\cite{bf-compiler}. Additionally, as brainfuck is a turing complete programming language, it is often used to proof another system (e.g. a configuration or preprocessing engine) is turing complete itself by implementing a brainfuck interpreter inside it. \\
+Brainfuck is a very simple language consisting of only eight operators. It is similar to a turing machine\cite{turing}: it operates on an infinite band, the pointer can be moved to the right using the operator \verb'>' and to the left using \verb'<'. There is an operator \verb'+' which increments the current cell and the \verb'-' operator for decrementing. Cells are 1-byte sized and wrap around on overflow. The two I/O operators \verb',' and \verb'.' read a byte from the program input and write a byte to the output respectively. The remaining two operators \verb'[' and \verb']' denote the start and end of a conditional loop. When execution reaches a \verb'[' and the current value is not zero, execution continues with the next character. Alternatively when the current value is zero the loop body is skipped, continuing execution after the matching \verb']' operator. \\
+Often brainfuck operators are explained using corresponding C expressions. The turing machine band is represented by an array of \verb'uint8_t's and a pointer to the current value is held in \verb'p'. Figure \ref{fig:bfbasics} serves as an overview over all brainfuck operators, their corresponding C expressions and their representation in \textit{speedfuck}\footnote{Optimizing brainfuck compiler\cite{speedfuck} discussed and used in sections \ref{sec:implementation} and \ref{sec:experiments}} abstract syntax tree dumps\cite{speedfuck}.
+
+\begin{figure}[H]
+	\centering
+	\begin{tabular}{| c | l | l |}
+	\hline
+	Operator & C expression & Speedfuck AST Dumps \\
+	\hline
+	\verb'+' & \verb'(*p)++' & \verb'Add 0 (Const 1)' \\
+	\verb'-' & \verb'(*p)--' & \verb'Add 0 (Const (-1))' \\
+	\verb'>' & \verb'p++' & \verb'Shift 1' \\
+	\verb'<' & \verb'p--' & \verb'Shift (-1)' \\
+	\verb',' & \verb'*p = getchar()' & \verb'Input 0' \\
+	\verb'.' & \verb'putchar(*p)' & \verb'Output (Var 0 (1 % 1))' \\
+	\verb'[' & \verb'while(*p) {' & \verb'Loop 0 [' \\
+	\verb']' & \verb'}' & \verb']' \\
+	\hline
+	\end{tabular}
+	\caption{Brainfuck operators and their meaning}
+	\label{fig:bfbasics}
+\end{figure}
+
+\section{Brainfuck Patterns And Optimizations} \label{sec:bfpatterns}
+Brainfuck has a couple common patterns and optimizations possibilities, some of which are mandatory in order to be able to generate quantum circuits later. This section covers relevant optimization techniques and their underlying brainfuck programming patterns. \\
+A very common optimization is to inline the shift operators \verb'>' and \verb'<'. With this optimization for example the program \verb'+>+<' can be represented as \verb'p[0]++; p[1]++;'. As there is no easy way to implement a pointer to a qubit in a quantum circuit this optimization is mandatory and required to succeed in order to convert a program to a quantum circuit later. Brainfuck loops wit unbalanced occurences of the shift operators however cannot be optimized, i.e. the program \verb',[>]+' will shift right once when the user inputs a non-zero byte. The \verb'+' operator at the end of the program increments either \verb'p[0]' or \verb'p[1]' depending on user input. \\
+A very common pattern seen in brainfuck programs are \textit{copy loops}. A \textit{copy loop} is a loop that decrements one cell and increments other cells. For example the program \verb',[->+>++<<]' can be optimized to
+\begin{verbatim}
+p[0] = getchar();
+p[1] = p[0];
+p[2] = 2 * p[1];
+p[0] = 0;
+\end{verbatim}
+
+As shown \textit{copy loops} can be used to copy and scale a value, but always set the source cell to zero. The \verb'[-]' program is a special copy loop without any target cells and thus simply sets the source cell to zero. \\
+Another pattern are \textit{if loops}, which are loops executed at most one time. They usually simply set their condition cell to zero. For example the program \verb',[>+<[-]]' increments \verb'p[1]' if a non-zero byte is read. Loops are difficult to implement in quantum circuits, as discussed in the next section, which is why this optimization is helpful in reducing circuit size.
+
+
+
+\section{Brainfuck Operators As Quantum Circuits} \label{sec:circuits}
+Implementing the increment operator as a quantum circuit can be achieved by using controlled Pauli X Gates: The least significant bit, with index 0, always flips. A bit $n$ flips when all less significant bits flipped from $1$ to $0$, i.e. a 1 caried through to bit $n$. Figure \ref{fig:op:plus} shows the circuit for a single increment.
+\begin{figure}[H]
+	\centering
+	\includesvg[height=.45\textwidth]{img/increment.svg}
+	\caption{+ operator circuit}
+	\label{fig:op:plus}
+\end{figure}
+
+The circuit of the decrement operator, shown in figure \ref{fig:op:minus}, is similar. It is too achieved using Pauli X Gates, but a bit $n$ flips when all less significant bits flipped from $0$ to $1$, i.e. a 1 is borrowed from $n$.
+\begin{figure}[H]
+	\centering
+	\includesvg[height=.45\textwidth]{img/decrement.svg}
+	\caption{- operator circuit}
+	\label{fig:op:minus}
+\end{figure}
+
+Figure \ref{fig:op:input} shows the circuit for the \verb',' operator. The target qubit is first reset and then put into a simple superposition $\frac{\ket{1} + \ket{0}}{\sqrt{2}}$ using Hadamard gates. This means all possible input values are said to have the same probability. \\
+In code analysis the \verb'.' operator usually does not have any effect. In our case we use it to define what is a valid program and what is invalid behaviour. In brainfuck the \verb'.' operator writes the 8-bit value of the current cell as an ASCII character to the output. However there are only 127 ASCII characters, 95 of which are printable. Figure \ref{fig:op:output} shows a simple circuit to check wether a cell \verb'p[0]' is printable, i.e. if it is $< 128$ and $\geq 32$. When a value is non-printable and there has not been an invalid output operator before, the quantum register \textit{err} is set to $\ket{11}$. At the end of the circuit all amplitudes with $\text{err}_0$ being $1$ belong to experiments with non printable character outputs. Thus when the probability sum of all these results is 0 the program is proven to never output a non printable character, i.e. it is bug free.
+
+\begin{figure}[H]
+	\begin{subfigure}[b]{.45\textwidth}
+		\centering
+		\includesvg[height=\textwidth]{img/input.svg}
+		\caption{, operator circuit}
+		\label{fig:op:input}
+	\end{subfigure}
+	~
+	\begin{subfigure}[b]{.54\textwidth}
+		\centering
+		\includesvg[height=\textwidth]{img/output.svg}
+		\caption{. operator circuit}
+		\label{fig:op:output}
+	\end{subfigure}
+	\caption{IO operator circuits}
+	\label{fig:op:io}
+\end{figure}
+
+The concept of loops does not exist in quantum circuits. Thus in the best case the amount of times a loop is executed can be predicted by the optimizer or the loop can be optimized away completely as described in section \ref{sec:bfpatterns}. When both is not possible all gates inside the loop have to be converted to controlled gates depending on a loop condition ancilla qubit. As shown in the first section of \ref{fig:op:loop} this ancilla bit is set to $\ket{0}$ when the loop condition register is all zeros and to $\ket{1}$ otherwise. The right hand side in figure \ref{fig:op:loop} is a simple increment operator as described above, but additionally controlled by $\text{if}_0$, i.e. it is inside the loop body.
+\begin{figure}[H]
+	\centering
+	\includesvg[height=.5\textwidth]{img/loop.svg}
+	\caption{[ ] operators circuit}
+	\label{fig:op:loop}
+\end{figure}
+
+
+
+\section{Implementation Details} \label{sec:implementation}
+There already exists a wide variety of brainfuck compilers\cite{speedfuck, bfc0, bfc1, bfc2, bfc3}. For this paper speedfuck\cite{speedfuck} an optimizing brainfuck compiler written in Haskell is used. It already includes the mandatory and optional optimizations described in section \ref{sec:bfpatterns}. It can dump its internal presentation which is summarized in figure \ref{fig:bfbasics}. For the purpose of this paper the compiler was extended by a JSON export functionality, allowing to easily import optimised version of brainfuck programs in Python. The intermediate representation was then translated to quantum circuits and simulated using the Qiskit quantum computing framework\cite{qiskit}. Qiskits backend is based on OpenQASM\cite{openqasm}, but its frontend provides higher level gates, such as the arbitrary count controlled Pauli X gate, which is used by nearly all brainfuck operator quantum circuit representations.
+
+
+
+\section{Validating Brainfuck Programs} \label{sec:experiments}
+The simplest program to validate is \verb'.' a single output operator. The value in the current cell is never changed and is thus zero, which is a non-printable ASCII character. Speedfuck already optimizes this program to a single \verb'Print "\NUL"' statement. Thus there is no quantum computing required to invalidate the correctness of this program. \\
+Prepeding the output operator by an input operator results in \verb',.' which cannot be optimized to a constant \verb'Print' statement. Converting this program to a quantum circuit results in first setting all qubits of \verb'p[0]' to $\frac{\ket{1} + \ket{0}}{\sqrt{2}}$ using the circuit shown in figure \ref{fig:op:input}. Aftherwards the printable character check as described in section \ref{sec:circuits} is applied. Running the simulation with qiskit results in a probability of an error of $0.625$. There are 256 possible byte values, 160 of them are not not printable according to the definition from section \ref{sec:circuits}, i.e. $62.5\%$ of all byte values are non printable ascii characters. \\
+A simple program which changes output according to user input but is still safe to never output a non printable character is \verb',[[-]>+<]+++++++++++++[->+++++<]>.'. It reads a character from input and outputs \verb'A' or \verb'B' depending on the input char being zero or non-zero. Parsing and optimizing this program with speedfuck results in the following AST dump:
+\begin{lstlisting}
+Input 0
+Loop 0:
+	Add 1 (Const 1)
+	Set 0 (Const 0)
+Add 1 (Const 65)
+Output (Var 1 (1 % 1))
+\end{lstlisting}
+
+Figure \ref{fig:simplesafe} shows the quantum circuit for validating this brainfuck program. It consists of 19 qubits: Two 8 qubit registers \verb'p[0]' and \verb'p[1]', an ancilla bit \verb'if' which is $\ket{1}$ when the condition of the loop is true, i.e. a non-zero byte was read, and $\ket{0}$ otherwise. The two remaining QuBits belong to the quantum register \verb'err' which tracks wether an error occured, i.e. a non-printable character was written.
+
+\begin{figure}[H]
+	\centering
+	\includesvg[width=\textwidth]{img/simple-safe.svg}
+	\caption{}
+	\label{fig:simplesafe}
+\end{figure}
+
+ % TODO longer program with bounds checking?
+
+
+
+\section{Conclusion}
+After introducing the basics of brainfuck and some common brainfuck programming patterns, this paper covered how to convert intermediate code taken from an existing brainfuck compiler into quantum circuits. A fully automated tool was created which can simulate a given brainfuck program using the Qiskit quantum development framework. \\
+In further work similar techniques could be applied for analyzing languages such as C or even generate quantum circuits from e.g. intel assembly instructions. This could be used to verify not only printable output, but also the absence of returns to invalid addresses caused by e.g. buffer overflows. \\
+With large enough quantum computing capabilities even full processor could be simulated, instead of single functions. \\
+Additionally these approaches could be compared to and combined with traditional formal proofs of algorithms and programs.
+
+
+
+\begin{thebibliography}{9}
+	\bibitem{turing} Alan Turing,
+		\textit{Intelligent Machinery}.
+		1948.
+		
+	\bibitem{openqasm} Andrew W. Cross et. al,
+		\textit{Open Quantum Assembly Language}.
+		2017.
+		
+	\bibitem{derp1} Huiyang Zhou and Gregory T. Byrd,
+		\textit{Quantum Circuits for Dynamic Runtime Assertions in Quantum Computation}.
+		2020.
+
+	\bibitem{bf-chatbot} \url{https://github.com/ddevault/bf-irc-bot}
+		\textit{An IRC bot written in brainfuck.}
+		retrieved September 26 2020.
+
+	\bibitem{bf-compiler} \url{https://github.com/matslina/awib}
+		\textit{A brainfuck compiler written in brainfuck.}
+		retrieved September 26 2020.
+	
+	\bibitem{speedfuck} \url{https://github.com/M4GNV5/Geschwindigkeitsficken}
+		\textit{Speedfuck - optimizing brainfuck compiler.}
+		retrieved September 29 2020.
+		
+	\bibitem{bfc0} \url{http://djm.cc/dmoews.html}
+		\textit{bfdb: optimizing interpreter, debugger and compiler for brainfuck.}
+		retrieved September 30 2020.
+		
+			
+	\bibitem{bfc1} \url{https://github.com/cameronswinoga/yabfc}
+		\textit{Yet Another Brainfuck Compiler.}
+		retrieved September 30 2020.
+		
+			
+	\bibitem{bfc2} \url{https://code.google.com/archive/p/esotope-bfc/}
+		\textit{Esotope Brainfuck Compiler.}
+		retrieved September 30 2020.
+		
+			
+	\bibitem{bfc3} \url{https://github.com/matslina/bfoptimization}
+		\textit{"Research" on how to best optimize brainfuck code.}
+		retrieved September 30 2020.
+		
+	\bibitem{qiskit} \url{https://qiskit.org/}
+		\textit{Open-Source Quantum Development.}
+		retrieved September 30 2020.
+\end{thebibliography}
+
+\end{document}
